@@ -4,6 +4,7 @@ import requests
 import re
 import time
 import numpy as np
+import altair as alt
 from fuzzywuzzy import process as fw_process
 
 # --- CONFIGURATION ---
@@ -55,16 +56,7 @@ st.markdown("""
         border-color: #3b82f6;
         transform: translateY(-2px);
     }
-    div[data-testid="stMetric"] label {
-        color: #64748b; /* Slate 500 */
-        font-size: 0.875rem;
-        font-weight: 500;
-    }
-    div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
-        color: #0f172a; /* Slate 900 */
-        font-weight: 700;
-    }
-
+    
     /* Tabs Styling */
     .stTabs [data-baseweb="tab-list"] {
         gap: 2rem;
@@ -82,25 +74,6 @@ st.markdown("""
         color: #2563eb; /* Blue 600 */
         border-bottom-color: #2563eb;
     }
-
-    /* Dataframe & Expander Styling */
-    div[data-testid="stExpander"] {
-        background-color: white;
-        border-radius: 10px;
-        border: 1px solid #e2e8f0;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.05);
-    }
-    
-    /* Buttons */
-    div.stButton > button {
-        border-radius: 8px;
-        font-weight: 600;
-        padding: 0.5rem 1rem;
-    }
-    
-    /* Custom Classes */
-    .highlight-red { color: #dc2626; font-weight: bold; }
-    .highlight-blue { color: #2563eb; font-weight: bold; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -201,6 +174,15 @@ def parse_time_slots(prescription_str):
             
     return list(slots)
 
+def determine_severity(text):
+    """Parses FDA warning text to determine severity level."""
+    t = text.lower()
+    if any(x in t for x in ['contraindicated', 'avoid', 'fatal', 'life-threatening', 'severe', 'serious', 'major']):
+        return 'High'
+    if any(x in t for x in ['monitor', 'caution', 'risk', 'adjust', 'potential', 'care']):
+        return 'Moderate'
+    return 'Low'
+
 @st.cache_data(ttl=3600) 
 def check_fda_interaction(drug_a, drug_b):
     base_url = "https://api.fda.gov/drug/label.json"
@@ -266,12 +248,13 @@ def analyze_row(row_str, row_id):
                 ing_b = unique_ingredients[j]
                 has_interaction, desc = check_fda_interaction(ing_a, ing_b)
                 if has_interaction:
+                    severity = determine_severity(desc)
                     alerts.append({
                         'Prescription ID': row_id,
                         'Time Slot': slot,
                         'Drug Pair': f"{ing_a} + {ing_b}",
                         'Warning': desc,
-                        'Severity': 'Review Required'
+                        'Severity': severity
                     })
     return alerts
 
@@ -299,7 +282,6 @@ with st.sidebar:
     st.info("ℹ️ **Privacy Note:**\nAll processing happens in-memory. No data is stored.")
 
 # Main Layout
-# Custom Header (HTML5 Style)
 st.markdown("""
 <div class="main-header">
     <div style="font-size: 2.5rem;">💊</div>
@@ -385,10 +367,15 @@ if uploaded_file:
             if all_alerts:
                 results_df = pd.DataFrame(all_alerts)
                 
-                # 1. Metrics Cards (HTML5 Style)
+                # Metrics Prep
+                total_rx = len(df)
+                affected_rx_count = results_df['Prescription ID'].nunique()
+                safe_rx_count = total_rx - affected_rx_count
+                
+                # 1. Metrics Cards
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Total Interactions", len(results_df), delta="Detected", delta_color="inverse")
-                m2.metric("Affected Prescriptions", results_df['Prescription ID'].nunique(), delta="Patients", delta_color="off")
+                m2.metric("At-Risk Prescriptions", affected_rx_count, delta=f"{affected_rx_count/total_rx*100:.1f}%", delta_color="inverse")
                 m3.metric("Unique Drug Pairs", results_df['Drug Pair'].nunique(), delta="Combinations", delta_color="off")
                 
                 st.write("") # Spacing
@@ -397,13 +384,84 @@ if uploaded_file:
                 tab_viz, tab_data, tab_export = st.tabs(["📊 Visualizations", "📋 Interaction Log", "📥 Exports"])
                 
                 with tab_viz:
+                    # Row 1: Donut & Severity
                     c1, c2 = st.columns(2)
+                    
                     with c1:
-                        st.markdown("##### 🕒 Interactions by Time Slot")
-                        st.bar_chart(results_df['Time Slot'].value_counts(), color="#ef4444") # Red for alerts
+                        st.markdown("##### 🍩 DDI Prevalence")
+                        # PREVALENCE DONUT CHART
+                        prev_data = pd.DataFrame({
+                            'Status': ['At Risk', 'Safe'],
+                            'Count': [affected_rx_count, safe_rx_count]
+                        })
+                        
+                        base = alt.Chart(prev_data).encode(
+                            theta=alt.Theta("Count", stack=True)
+                        )
+                        
+                        pie = base.mark_arc(outerRadius=120, innerRadius=80).encode(
+                            color=alt.Color("Status", scale=alt.Scale(domain=['At Risk', 'Safe'], range=['#ef4444', '#3b82f6'])),
+                            tooltip=["Status", "Count"]
+                        )
+                        text = base.mark_text(radius=140).encode(
+                            text=alt.Text("Count", format="d"),
+                            order=alt.Order("Status", sort="descending"),
+                            color=alt.value("black") 
+                        )
+                        st.altair_chart(pie + text, use_container_width=True)
+                        
                     with c2:
-                        st.markdown("##### 💊 Most Frequent Pairs")
-                        st.bar_chart(results_df['Drug Pair'].value_counts().head(10), color="#3b82f6") # Blue
+                        st.markdown("##### ⚠️ Severity Distribution")
+                        # SEVERITY DISTRIBUTION CHART
+                        sev_counts = results_df['Severity'].value_counts().reset_index()
+                        sev_counts.columns = ['Severity', 'Count']
+                        
+                        sev_chart = alt.Chart(sev_counts).mark_bar().encode(
+                            x=alt.X('Severity', sort=['High', 'Moderate', 'Low']),
+                            y='Count',
+                            color=alt.Color('Severity', scale=alt.Scale(
+                                domain=['High', 'Moderate', 'Low'],
+                                range=['#b91c1c', '#f59e0b', '#3b82f6']
+                            )),
+                            tooltip=['Severity', 'Count']
+                        )
+                        st.altair_chart(sev_chart, use_container_width=True)
+
+                    st.divider()
+
+                    # Row 2: Burden & Pairs
+                    c3, c4 = st.columns(2)
+                    
+                    with c3:
+                        st.markdown("##### 📉 DDIs per Prescription (Burden)")
+                        # BURDEN DISTRIBUTION
+                        burden_counts = results_df['Prescription ID'].value_counts().reset_index()
+                        burden_counts.columns = ['Prescription ID', 'Alert Count']
+                        # Count how many Rx have 1 alert, 2 alerts, etc.
+                        dist_data = burden_counts['Alert Count'].value_counts().reset_index()
+                        dist_data.columns = ['Alerts per Rx', 'Frequency']
+                        
+                        dist_chart = alt.Chart(dist_data).mark_bar().encode(
+                            x=alt.X('Alerts per Rx:O', title="Number of Alerts"),
+                            y=alt.Y('Frequency:Q', title="Number of Prescriptions"),
+                            color=alt.value("#6366f1"),
+                            tooltip=['Alerts per Rx', 'Frequency']
+                        )
+                        st.altair_chart(dist_chart, use_container_width=True)
+
+                    with c4:
+                        st.markdown("##### 💊 Top 10 Frequent Pairs")
+                        # TOP PAIRS CHART
+                        top_pairs = results_df['Drug Pair'].value_counts().head(10).reset_index()
+                        top_pairs.columns = ['Pair', 'Count']
+                        
+                        pair_chart = alt.Chart(top_pairs).mark_bar().encode(
+                            x=alt.X('Count', title='Occurrences'),
+                            y=alt.Y('Pair', sort='-x', title='Drug Pair'),
+                            color=alt.value("#10b981"),
+                            tooltip=['Pair', 'Count']
+                        )
+                        st.altair_chart(pair_chart, use_container_width=True)
 
                 with tab_data:
                     # Search
@@ -422,6 +480,7 @@ if uploaded_file:
                         column_config={
                             "Warning": st.column_config.TextColumn("FDA Warning Text", width="large", help="Text extracted from FDA Label"),
                             "Drug Pair": st.column_config.TextColumn("Pair", width="medium"),
+                            "Severity": st.column_config.TextColumn("Severity", width="small"),
                         },
                         hide_index=True
                     )
