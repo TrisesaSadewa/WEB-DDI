@@ -183,32 +183,59 @@ def determine_severity(text):
         return 'Moderate'
     return 'Low'
 
-@st.cache_data(ttl=3600) 
-def check_fda_interaction(drug_a, drug_b):
+# --- NEW: ROBUST TEXT MINING LOGIC ---
+# Instead of trusting the API search, we download the FULL label and scan it ourselves.
+@st.cache_data(ttl=7200)
+def get_drug_label_text(drug_name):
+    """Fetches full label text (Warnings, Interactions, Contraindications, Boxed Warning) for a drug."""
     base_url = "https://api.fda.gov/drug/label.json"
-    search_query = f'openfda.substance_name:"{drug_a}"+AND+(drug_interactions:"{drug_b}"+OR+warnings:"{drug_b}")'
-    params = {'search': search_query, 'limit': 1}
+    # Search just by the drug name
+    params = {'search': f'openfda.substance_name:"{drug_name}"', 'limit': 1}
     
     try:
         resp = requests.get(base_url, params=params, timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             if 'results' in data:
-                text = data['results'][0].get('drug_interactions', [''])[0]
-                if not text: text = data['results'][0].get('warnings', [''])[0]
-                return True, text[:300] + "..."
-        
-        search_query_rev = f'openfda.substance_name:"{drug_b}"+AND+(drug_interactions:"{drug_a}"+OR+warnings:"{drug_a}")'
-        params_rev = {'search': search_query_rev, 'limit': 1}
-        resp_rev = requests.get(base_url, params=params_rev, timeout=5)
-        if resp_rev.status_code == 200:
-            data = resp_rev.json()
-            if 'results' in data:
-                text = data['results'][0].get('drug_interactions', [''])[0]
-                return True, text[:300] + "..."
-                
+                res = data['results'][0]
+                # Combine all relevant fields
+                full_text = ""
+                fields = [
+                    'drug_interactions', 'warnings', 'precautions', 
+                    'contraindications', 'boxed_warning', 'warnings_and_cautions'
+                ]
+                for f in fields:
+                    if f in res and isinstance(res[f], list):
+                        full_text += " ".join(res[f]) + " "
+                return full_text
     except Exception:
-        return False, None
+        return ""
+    return ""
+
+def check_fda_interaction_robust(drug_a, drug_b):
+    """
+    1. Fetches full label for Drug A.
+    2. Scans text for Drug B.
+    3. If not found, fetches label for Drug B and scans for Drug A.
+    """
+    # 1. Check A -> B
+    text_a = get_drug_label_text(drug_a)
+    if text_a:
+        # Simple regex word boundary search
+        if re.search(r'\b' + re.escape(drug_b) + r'\b', text_a, re.IGNORECASE):
+            # Extract a snippet context
+            match = re.search(r'([^.]*?' + re.escape(drug_b) + r'[^.]*\.)', text_a, re.IGNORECASE)
+            snippet = match.group(1) if match else f"Interaction found in label of {drug_a}."
+            return True, snippet[:300] + "..."
+            
+    # 2. Check B -> A (Reverse)
+    text_b = get_drug_label_text(drug_b)
+    if text_b:
+        if re.search(r'\b' + re.escape(drug_a) + r'\b', text_b, re.IGNORECASE):
+            match = re.search(r'([^.]*?' + re.escape(drug_a) + r'[^.]*\.)', text_b, re.IGNORECASE)
+            snippet = match.group(1) if match else f"Interaction found in label of {drug_b}."
+            return True, snippet[:300] + "..."
+            
     return False, None
 
 def analyze_row(row_str, row_id):
@@ -246,7 +273,10 @@ def analyze_row(row_str, row_id):
             for j in range(i + 1, len(unique_ingredients)):
                 ing_a = unique_ingredients[i]
                 ing_b = unique_ingredients[j]
-                has_interaction, desc = check_fda_interaction(ing_a, ing_b)
+                
+                # Use the new robust checker
+                has_interaction, desc = check_fda_interaction_robust(ing_a, ing_b)
+                
                 if has_interaction:
                     severity = determine_severity(desc)
                     alerts.append({
@@ -355,7 +385,8 @@ if uploaded_file:
                 pct = (index + 1) / total_rows
                 p_bar.progress(min(pct, 1.0))
                 status_text.markdown(f"<span style='color:#64748b'>Processing prescription <b>{index + 1}</b> of <b>{total_rows}</b>...</span>", unsafe_allow_html=True)
-                time.sleep(0.02) # Slight throttle
+                # Reduced sleep since we want speed, but API still needs respect
+                time.sleep(0.01) 
                 
             # Cleanup Progress
             p_bar.empty()
