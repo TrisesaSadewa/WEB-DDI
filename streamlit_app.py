@@ -301,8 +301,8 @@ if uploaded_file:
                         full_burden = burden_counts.reindex(all_ids, fill_value=0)
                         
                         # Now count frequencies (How many have 0? How many have 1?)
-                        freq_dist = full_burden.value_counts().reset_index()
-                        freq_dist.columns = ['Alerts', 'Count']
+                        # FIX: Explicitly rename axis and column to avoid 'count' collision
+                        freq_dist = full_burden.value_counts().rename_axis('Alerts').reset_index(name='Count')
                         
                         chart = alt.Chart(freq_dist).mark_bar().encode(
                             x=alt.X('Alerts:O', title="Alerts per Rx"),
