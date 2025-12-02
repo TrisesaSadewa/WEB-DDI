@@ -177,10 +177,20 @@ def parse_time_slots(prescription_str):
 def determine_severity(text):
     """Parses FDA warning text to determine severity level."""
     t = text.lower()
-    if any(x in t for x in ['contraindicated', 'avoid', 'fatal', 'life-threatening', 'severe', 'serious', 'major']):
+    high_keywords = [
+        'contraindicated', 'avoid', 'fatal', 'life-threatening', 'severe', 'serious', 'major',
+        'do not use', 'unsafe', 'anaphylaxis', 'hypoglycemia', 'hospitalization', 'death'
+    ]
+    if any(x in t for x in high_keywords):
         return 'High'
-    if any(x in t for x in ['monitor', 'caution', 'risk', 'adjust', 'potential', 'care']):
+        
+    moderate_keywords = [
+        'monitor', 'caution', 'risk', 'adjust', 'potential', 'care', 'consider',
+        'may increase', 'may decrease', 'alter'
+    ]
+    if any(x in t for x in moderate_keywords):
         return 'Moderate'
+        
     return 'Low'
 
 # --- NEW: ROBUST TEXT MINING LOGIC ---
@@ -218,23 +228,44 @@ def check_fda_interaction_robust(drug_a, drug_b):
     2. Scans text for Drug B.
     3. If not found, fetches label for Drug B and scans for Drug A.
     """
+    def find_interaction_in_text(source_drug, target_drug, text):
+        if not text: return None, None
+        
+        # BROADER SEARCH: Allow for hyphenated or suffixed variations (e.g. "Metformin-containing")
+        # Regex explanation:
+        # \b = Word boundary
+        # re.escape(target_drug) = The drug name
+        # [a-zA-Z-]* = Allow suffixes like "-containing", "s" (plural), etc.
+        pattern = r'\b' + re.escape(target_drug) + r'[a-zA-Z-]*'
+        
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            # CONTEXT EXPANSION:
+            # We want the sentence containing the match, PLUS the surrounding sentences
+            # to capture severity context like "Avoid use." which might be the next sentence.
+            start_idx = match.start()
+            end_idx = match.end()
+            
+            # Grab a window of 500 characters around the match
+            window_start = max(0, start_idx - 250)
+            window_end = min(len(text), end_idx + 250)
+            
+            snippet = text[window_start:window_end]
+            
+            # Clean up snippet to start/end at full words roughly
+            snippet = "..." + snippet.strip() + "..."
+            return True, snippet
+        return False, None
+
     # 1. Check A -> B
     text_a = get_drug_label_text(drug_a)
-    if text_a:
-        # Simple regex word boundary search
-        if re.search(r'\b' + re.escape(drug_b) + r'\b', text_a, re.IGNORECASE):
-            # Extract a snippet context
-            match = re.search(r'([^.]*?' + re.escape(drug_b) + r'[^.]*\.)', text_a, re.IGNORECASE)
-            snippet = match.group(1) if match else f"Interaction found in label of {drug_a}."
-            return True, snippet[:300] + "..."
-            
+    found, desc = find_interaction_in_text(drug_a, drug_b, text_a)
+    if found: return True, desc
+
     # 2. Check B -> A (Reverse)
     text_b = get_drug_label_text(drug_b)
-    if text_b:
-        if re.search(r'\b' + re.escape(drug_a) + r'\b', text_b, re.IGNORECASE):
-            match = re.search(r'([^.]*?' + re.escape(drug_a) + r'[^.]*\.)', text_b, re.IGNORECASE)
-            snippet = match.group(1) if match else f"Interaction found in label of {drug_b}."
-            return True, snippet[:300] + "..."
+    found, desc = find_interaction_in_text(drug_b, drug_a, text_b)
+    if found: return True, desc
             
     return False, None
 
