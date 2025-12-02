@@ -10,26 +10,97 @@ from fuzzywuzzy import process as fw_process
 st.set_page_config(
     page_title="DDI Analysis Tool", 
     layout="wide",
-    page_icon="💊"
+    page_icon="💊",
+    initial_sidebar_state="expanded"
 )
 
-# --- CUSTOM CSS ---
+# --- CUSTOM CSS (HTML5 LOOK & FEEL) ---
 st.markdown("""
     <style>
-    .main {
-        background-color: #f8f9fa;
+    /* Main Background - Slate 50 */
+    .stApp {
+        background-color: #f8fafc;
+        color: #1e293b;
     }
-    .stMetric {
+    
+    /* Sidebar Background - White */
+    [data-testid="stSidebar"] {
         background-color: #ffffff;
-        padding: 15px;
-        border-radius: 10px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        border-right: 1px solid #e2e8f0;
     }
+
+    /* Navbar-like Header */
+    .main-header {
+        background-color: white;
+        padding: 1.5rem 2rem;
+        border-radius: 12px;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+        margin-bottom: 2rem;
+        border: 1px solid #f1f5f9;
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+    }
+    
+    /* Metric Cards Styling */
+    div[data-testid="stMetric"] {
+        background-color: white;
+        padding: 1.25rem;
+        border-radius: 12px;
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px -1px rgba(0, 0, 0, 0.1);
+        transition: all 0.2s ease;
+    }
+    div[data-testid="stMetric"]:hover {
+        border-color: #3b82f6;
+        transform: translateY(-2px);
+    }
+    div[data-testid="stMetric"] label {
+        color: #64748b; /* Slate 500 */
+        font-size: 0.875rem;
+        font-weight: 500;
+    }
+    div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
+        color: #0f172a; /* Slate 900 */
+        font-weight: 700;
+    }
+
+    /* Tabs Styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 2rem;
+        border-bottom: 1px solid #e2e8f0;
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 3rem;
+        white-space: pre-wrap;
+        background-color: transparent;
+        border-radius: 4px 4px 0 0;
+        color: #64748b;
+        font-weight: 600;
+    }
+    .stTabs [aria-selected="true"] {
+        color: #2563eb; /* Blue 600 */
+        border-bottom-color: #2563eb;
+    }
+
+    /* Dataframe & Expander Styling */
     div[data-testid="stExpander"] {
         background-color: white;
         border-radius: 10px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.05);
     }
+    
+    /* Buttons */
+    div.stButton > button {
+        border-radius: 8px;
+        font-weight: 600;
+        padding: 0.5rem 1rem;
+    }
+    
+    /* Custom Classes */
+    .highlight-red { color: #dc2626; font-weight: bold; }
+    .highlight-blue { color: #2563eb; font-weight: bold; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -37,16 +108,14 @@ st.markdown("""
 def load_db_logic():
     """Attempts to load external DB, falls back to Mock DB."""
     try:
-        # Tries to import from the file you uploaded to the folder
         import structured_drug_db
         from structured_drug_db import get_drug_by_name
         return True, get_drug_by_name
     except ImportError:
-        # --- MOCK DB (Fallback if file is missing) ---
         class MockDrug:
             def __init__(self, name, contents):
                 self.name = name
-                self.contents = contents # Matches your file structure
+                self.contents = contents 
 
         MOCK_DRUG_DB = {
             'ACRAN': ['RANITIDINE'],
@@ -86,10 +155,8 @@ def load_db_logic():
 
         def mock_get_drug_by_name(query):
             query_upper = query.upper()
-            # 1. Exact match
             if query_upper in MOCK_DRUG_DB:
                 return MockDrug(query_upper, MOCK_DRUG_DB[query_upper])
-            # 2. Fuzzy match
             match, score = fw_process.extractOne(query_upper, MOCK_DRUG_DB.keys())
             if score > 85:
                 return MockDrug(match, MOCK_DRUG_DB[match])
@@ -103,38 +170,30 @@ is_external_db, get_drug_func = load_db_logic()
 # --- HELPER FUNCTIONS ---
 
 def clean_drug_name(raw_text):
-    """Extracts the likely brand name from the raw string."""
     text = str(raw_text).upper()
-    # Remove common prescription noise
     text = text.split(':')[0] 
     text = text.split('TAB')[0]
     text = text.split('CAP')[0]
     text = text.split('SYR')[0]
     text = text.split('BTL')[0]
     text = text.split('FLS')[0]
-    # Keep only letters and spaces
     text = re.sub(r'[^A-Z\s]', '', text) 
     return text.strip()
 
 def parse_time_slots(prescription_str):
-    """Parses dosage instructions to assign time slots."""
     s = prescription_str.lower()
     slots = set()
-    
-    # Frequency detection logic
     freq = 1
     if '2 dd' in s or '2x' in s: freq = 2
     elif '3 dd' in s or '3x' in s: freq = 3
     elif '4 dd' in s or '4x' in s: freq = 4
     elif '1 dd' in s or '1x' in s: freq = 1
     
-    # Specific time keywords
     if 'malam' in s or 'night' in s: slots.add('Night')
     if 'pagi' in s or 'morning' in s: slots.add('Morning')
     if 'siang' in s or 'noon' in s: slots.add('Noon')
     if 'sore' in s: slots.add('Night') 
 
-    # Default filling
     if not slots:
         if freq >= 1: slots.add('Morning')
         if freq >= 2: slots.add('Night')
@@ -144,15 +203,11 @@ def parse_time_slots(prescription_str):
 
 @st.cache_data(ttl=3600) 
 def check_fda_interaction(drug_a, drug_b):
-    """Queries OpenFDA to check if Drug A's label mentions Drug B in warnings."""
     base_url = "https://api.fda.gov/drug/label.json"
-    
-    # Query for Drug A's label looking for B
     search_query = f'openfda.substance_name:"{drug_a}"+AND+(drug_interactions:"{drug_b}"+OR+warnings:"{drug_b}")'
     params = {'search': search_query, 'limit': 1}
     
     try:
-        # Check A -> B
         resp = requests.get(base_url, params=params, timeout=5)
         if resp.status_code == 200:
             data = resp.json()
@@ -161,7 +216,6 @@ def check_fda_interaction(drug_a, drug_b):
                 if not text: text = data['results'][0].get('warnings', [''])[0]
                 return True, text[:300] + "..."
         
-        # Check B -> A (Reverse lookup)
         search_query_rev = f'openfda.substance_name:"{drug_b}"+AND+(drug_interactions:"{drug_a}"+OR+warnings:"{drug_a}")'
         params_rev = {'search': search_query_rev, 'limit': 1}
         resp_rev = requests.get(base_url, params=params_rev, timeout=5)
@@ -173,70 +227,44 @@ def check_fda_interaction(drug_a, drug_b):
                 
     except Exception:
         return False, None
-        
     return False, None
 
 def analyze_row(row_str, row_id):
-    """Process a single prescription row."""
-    if not isinstance(row_str, str):
-        return []
-
+    if not isinstance(row_str, str): return []
     items = row_str.split(';')
-    
-    # 1. Bucketize drugs by time
     time_buckets = {'Morning': [], 'Noon': [], 'Night': []}
     
     for item in items:
         if not item.strip(): continue
         clean_name = clean_drug_name(item)
-        
         try:
             drug_obj = get_drug_func(clean_name)
-            
             if drug_obj:
-                # --- FIX FOR ATTRIBUTE ERROR ---
-                # Your file uses 'contents', not 'active_ingredients'
-                # We also need to handle if contents is a String or a List
-                
                 raw_contents = getattr(drug_obj, 'contents', [])
-                
                 ingredients_list = []
                 if isinstance(raw_contents, str):
-                    # Handle "Acetaminophen, Caffeine" string format
                     ingredients_list = [x.strip() for x in raw_contents.split(',')]
                 elif isinstance(raw_contents, list):
-                    # Handle ["Attapulgite", "Pectin"] list format
                     ingredients_list = raw_contents
                 else:
-                    # Fallback
                     ingredients_list = getattr(drug_obj, 'active_ingredients', [])
 
                 if ingredients_list:
                     slots = parse_time_slots(item)
                     for slot in slots:
                         for ingredient in ingredients_list:
-                            # Clean ingredient name just in case
                             time_buckets[slot].append(ingredient.strip())
-                            
-        except Exception as e:
-            # Silently skip bad drug entries to prevent full crash
-            continue
+        except Exception: continue
 
-    # 2. Check interactions within buckets
     alerts = []
-    
     for slot, ingredients in time_buckets.items():
         if len(ingredients) < 2: continue
-        
         unique_ingredients = list(set(ingredients))
         for i in range(len(unique_ingredients)):
             for j in range(i + 1, len(unique_ingredients)):
                 ing_a = unique_ingredients[i]
                 ing_b = unique_ingredients[j]
-                
-                # Check FDA
                 has_interaction, desc = check_fda_interaction(ing_a, ing_b)
-                
                 if has_interaction:
                     alerts.append({
                         'Prescription ID': row_id,
@@ -249,35 +277,50 @@ def analyze_row(row_str, row_id):
 
 # --- MAIN UI ---
 
-# Sidebar for Setup
+# Sidebar
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/3063/3063167.png", width=60)
-    st.header("1. Upload Data")
-    uploaded_file = st.file_uploader("Upload .xlsx or .csv", type=['xlsx', 'csv'])
+    st.title("Setup")
+    
+    st.markdown("### 1. Upload Data")
+    uploaded_file = st.file_uploader("Choose .xlsx or .csv", type=['xlsx', 'csv'], label_visibility="collapsed")
     
     st.divider()
     
-    st.header("System Status")
+    st.markdown("### System Status")
     if is_external_db:
-        st.success("✅ External DB Loaded")
-        st.caption("Using `structured_drug_db.py`")
+        st.success("✅ **External DB Active**")
+        st.caption("Running with full `structured_drug_db`.")
     else:
-        st.warning("⚠️ Using Mock Database")
-        st.caption("`structured_drug_db.py` not detected. Using internal dictionary.")
+        st.warning("⚠️ **Mock DB Active**")
+        st.caption("Using internal dictionary.")
     
-    st.info("ℹ️ **Data Privacy:** Processed locally. OpenFDA API used for label text.")
+    st.divider()
+    st.info("ℹ️ **Privacy Note:**\nAll processing happens in-memory. No data is stored.")
 
-# Main Page
-st.title("💊 DDI Analyzer Pro")
-st.markdown("Automated detection of **drug-drug interactions** with **time-segmentation** (Morning/Noon/Night).")
+# Main Layout
+# Custom Header (HTML5 Style)
+st.markdown("""
+<div class="main-header">
+    <div style="font-size: 2.5rem;">💊</div>
+    <div>
+        <h1 style="margin:0; font-size: 1.8rem; color:#1e293b;">DDI Analyzer Pro</h1>
+        <p style="margin:0; color:#64748b;">Automated Prescription Interaction Scanner</p>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
 if uploaded_file:
     # Load Data
-    with st.spinner('Reading file...'):
-        if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file)
-        else:
-            df = pd.read_excel(uploaded_file)
+    with st.spinner('Parsing file structure...'):
+        try:
+            if uploaded_file.name.endswith('.csv'):
+                df = pd.read_csv(uploaded_file)
+            else:
+                df = pd.read_excel(uploaded_file)
+        except Exception as e:
+            st.error(f"Error reading file: {e}")
+            st.stop()
             
     # Column Discovery
     cols = df.columns.str.lower()
@@ -289,73 +332,82 @@ if uploaded_file:
     
     if not resep_col:
         st.error("❌ Column 'resep' not found. Please ensure your file contains the prescription column.")
-        st.dataframe(df.head())
+        with st.expander("Available Columns"):
+            st.write(df.columns.tolist())
     else:
-        # Show Data Preview
-        with st.expander("📄 Click to view Uploaded Data Preview", expanded=False):
-            st.dataframe(df.head(), use_container_width=True)
+        # Action Bar
+        col_preview, col_action = st.columns([2, 1])
+        with col_preview:
+            with st.expander("📄 Data Preview (First 5 rows)", expanded=False):
+                st.dataframe(df.head(), use_container_width=True)
+        
+        with col_action:
+            st.write("") # Spacing
+            start_btn = st.button("🚀 Start Analysis", type="primary", use_container_width=True)
 
-        if st.button("🚀 Run Analysis", type="primary", use_container_width=True):
+        if start_btn:
             all_alerts = []
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+            
+            # Progress UI
+            progress_container = st.container()
+            with progress_container:
+                st.write("---")
+                p_bar = st.progress(0)
+                status_text = st.empty()
             
             rows_to_process = df
             total_rows = len(rows_to_process)
             
+            # Processing Loop
             for index, row in rows_to_process.iterrows():
                 row_str = str(row[resep_col])
-                
-                # Identify ID column (optional)
                 row_id = row.get('No', row.get('ID', index + 1))
                 
-                # Analyze
                 try:
                     alerts = analyze_row(row_str, row_id)
                     all_alerts.extend(alerts)
                 except Exception as e:
                     print(f"Row {index} failed: {e}")
                 
-                # Update UI
+                # Update Progress
                 pct = (index + 1) / total_rows
-                progress_bar.progress(min(pct, 1.0))
-                status_text.text(f"Processing row {index + 1}/{total_rows}...")
+                p_bar.progress(min(pct, 1.0))
+                status_text.markdown(f"<span style='color:#64748b'>Processing prescription <b>{index + 1}</b> of <b>{total_rows}</b>...</span>", unsafe_allow_html=True)
+                time.sleep(0.02) # Slight throttle
                 
-                # Rate limit politeness
-                time.sleep(0.05)
-                
-            progress_bar.empty()
+            # Cleanup Progress
+            p_bar.empty()
             status_text.empty()
-            st.divider()
             
             # --- RESULTS DASHBOARD ---
+            st.markdown("### Analysis Report")
+            
             if all_alerts:
                 results_df = pd.DataFrame(all_alerts)
                 
-                # 1. Metrics Row
+                # 1. Metrics Cards (HTML5 Style)
                 m1, m2, m3 = st.columns(3)
-                m1.metric("Total Interactions", len(results_df), delta_color="inverse")
-                m2.metric("Affected Prescriptions", results_df['Prescription ID'].nunique(), delta_color="inverse")
-                m3.metric("Unique Drug Pairs", results_df['Drug Pair'].nunique())
+                m1.metric("Total Interactions", len(results_df), delta="Detected", delta_color="inverse")
+                m2.metric("Affected Prescriptions", results_df['Prescription ID'].nunique(), delta="Patients", delta_color="off")
+                m3.metric("Unique Drug Pairs", results_df['Drug Pair'].nunique(), delta="Combinations", delta_color="off")
                 
-                st.divider()
+                st.write("") # Spacing
 
-                # 2. Tabs for different views
-                tab1, tab2, tab3 = st.tabs(["📊 Charts", "📋 Detailed Log", "📥 Export"])
+                # 2. Tabs
+                tab_viz, tab_data, tab_export = st.tabs(["📊 Visualizations", "📋 Interaction Log", "📥 Exports"])
                 
-                with tab1:
+                with tab_viz:
                     c1, c2 = st.columns(2)
                     with c1:
-                        st.subheader("Interactions by Time Slot")
-                        st.bar_chart(results_df['Time Slot'].value_counts(), color="#FF4B4B")
+                        st.markdown("##### 🕒 Interactions by Time Slot")
+                        st.bar_chart(results_df['Time Slot'].value_counts(), color="#ef4444") # Red for alerts
                     with c2:
-                        st.subheader("Most Frequent Pairs")
-                        st.bar_chart(results_df['Drug Pair'].value_counts().head(10))
+                        st.markdown("##### 💊 Most Frequent Pairs")
+                        st.bar_chart(results_df['Drug Pair'].value_counts().head(10), color="#3b82f6") # Blue
 
-                with tab2:
-                    st.subheader("Interaction Details")
-                    # Search box
-                    search_term = st.text_input("🔍 Search drug name, ID, or warning text", "")
+                with tab_data:
+                    # Search
+                    search_term = st.text_input("🔍 Filter by Drug, ID or Keyword", "", placeholder="Type 'Aspirin' or '123'...")
                     
                     if search_term:
                         filtered_df = results_df[
@@ -368,21 +420,34 @@ if uploaded_file:
                         filtered_df, 
                         use_container_width=True,
                         column_config={
-                            "Warning": st.column_config.TextColumn("FDA Warning Text", width="large"),
-                        }
+                            "Warning": st.column_config.TextColumn("FDA Warning Text", width="large", help="Text extracted from FDA Label"),
+                            "Drug Pair": st.column_config.TextColumn("Pair", width="medium"),
+                        },
+                        hide_index=True
                     )
 
-                with tab3:
+                with tab_export:
+                    st.markdown("##### Download Results")
                     csv = results_df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="📥 Download Full Report (CSV)",
-                        data=csv,
-                        file_name="ddi_analysis_report.csv",
-                        mime="text/csv",
-                        type="primary"
-                    )
+                    c_down, _ = st.columns([1,3])
+                    with c_down:
+                        st.download_button(
+                            label="📥 Download CSV Report",
+                            data=csv,
+                            file_name="ddi_analysis_report.csv",
+                            mime="text/csv",
+                            type="primary",
+                            use_container_width=True
+                        )
             else:
-                st.success("✅ No major interactions detected in the analyzed sample.")
+                st.success("✅ **Analysis Complete:** No significant interactions detected in this dataset.")
                 st.balloons()
 else:
-    st.info("👈 Please upload a file to begin.")
+    # Empty State (HTML5 Style)
+    st.markdown("""
+    <div style="text-align: center; padding: 4rem 2rem; border: 2px dashed #cbd5e1; border-radius: 12px; background-color: white;">
+        <div style="font-size: 3rem; margin-bottom: 1rem; color: #94a3b8;">📂</div>
+        <h3 style="color: #475569;">No Data Uploaded</h3>
+        <p style="color: #64748b;">Upload a prescription file (.xlsx or .csv) from the sidebar to begin analysis.</p>
+    </div>
+    """, unsafe_allow_html=True)
