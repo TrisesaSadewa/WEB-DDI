@@ -21,67 +21,66 @@ except ImportError:
     def get_drug_by_name(name): return None
 
 # --- CONFIGURATION ---
-st.set_page_config(
-    page_title="DDI Analysis Tool", 
-    layout="wide",
-    page_icon="💊",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="DDI Analysis Tool", layout="wide", page_icon="💊")
 
-# --- CUSTOM CSS ---
-st.markdown("""
-    <style>
-    .stApp { background-color: #f8fafc; color: #1e293b; }
-    [data-testid="stSidebar"] { background-color: #ffffff; border-right: 1px solid #e2e8f0; }
-    .main-header {
-        background-color: white; padding: 1.5rem; border-radius: 12px;
-        box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); margin-bottom: 2rem;
-        border: 1px solid #f1f5f9; display: flex; align-items: center; gap: 1rem;
-    }
-    div[data-testid="stMetric"] {
-        background-color: white; border: 1px solid #e2e8f0; border-radius: 12px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-    }
-    </style>
-""", unsafe_allow_html=True)
-
-# 1. CANONICAL DRUG LIST (Target English Names)
-CANONICAL_DRUGS = [
-    'AMLODIPINE', 'ASPIRIN', 'ACETAMINOPHEN', 'BISOPROLOL', 'CANDESARTAN', 
-    'CAPTOPRIL', 'CARVEDILOL', 'CLOPIDOGREL', 'DIGOXIN', 'FENOFIBRATE', 
-    'FOLIC ACID', 'FUROSEMIDE', 'GABAPENTIN', 'GLYBURIDE', 'IBUPROFEN', 
-    'INSULIN', 'MELOXICAM', 'METFORMIN', 'METHYLPREDNISOLONE', 'NIFEDIPINE', 
-    'NITROGLYCERIN', 'OMEPRAZOLE', 'PHENYTOIN', 'SIMVASTATIN', 
-    'SODIUM BICARBONATE', 'SPIRONOLACTONE', 'SUCRALFATE', 'TRANEXAMIC ACID', 
-    'VALSARTAN', 'WARFARIN'
-]
-
-# 2. INDONESIAN DICTIONARY (Failsafe)
+# --- 1. ROBUST TRANSLATION MAP (The "Rosetta Stone") ---
+# Maps specific variations found in your datasets to the EXACT keys used in KNOWN_INTERACTIONS
 ID_TO_EN_MAP = {
-    'AMLODIPIN': 'AMLODIPINE', 'ASAM FOLAT': 'FOLIC ACID', 
-    'ASAM TRANEKSAMAT': 'TRANEXAMIC ACID', 'PARASETAMOL': 'ACETAMINOPHEN', 
-    'GLIBENKLAMID': 'GLYBURIDE', 'KLOPIDOGREL': 'CLOPIDOGREL', 
-    'KANDESARTAN': 'CANDESARTAN', 'BISOPROLOL': 'BISOPROLOL', 
-    'FUROSEMID': 'FUROSEMIDE', 'SPIRONOLAKTON': 'SPIRONOLACTONE', 
-    'SIMVASTATIN': 'SIMVASTATIN', 'FENITOIN': 'PHENYTOIN', 
-    'ASAM ASETILSALISILAT': 'ASPIRIN', 'ASETOSAL': 'ASPIRIN', 
-    'MINIASPI': 'ASPIRIN', 'NOSPIRINAL': 'ASPIRIN', 'V-BLOC': 'CARVEDILOL', 
-    'NITROKAF': 'NITROGLYCERIN', 'SUCRALFATE': 'SUCRALFATE', 
-    'IBUPROFEN': 'IBUPROFEN', 'OMEPRAZOLE': 'OMEPRAZOLE', 
-    'VALSARTAN': 'VALSARTAN', 'MELOXICAM': 'MELOXICAM', 
-    'CAPTOPRIL': 'CAPTOPRIL', 'METFORMIN': 'METFORMIN', 
-    'GABAPENTIN': 'GABAPENTIN', 'FENOFIBRATE': 'FENOFIBRATE', 
-    'NIFEDIPINE': 'NIFEDIPINE', 'DIGOXIN': 'DIGOXIN', 
-    'METHYL PREDNISOLON': 'METHYLPREDNISOLONE', 'NOTISIL': 'DIAZEPAM'
+    # Aspirin Variants
+    'ACETYLSALICYLIC ACID': 'ASPIRIN', 'ACETYL SALICYLIC ACID': 'ASPIRIN',
+    'ASAM ASETILSALISILAT': 'ASPIRIN', 'ASETOSAL': 'ASPIRIN',
+    'MINIASPI': 'ASPIRIN', 'NOSPIRINAL': 'ASPIRIN', 'ASPILET': 'ASPIRIN',
+    'THROMBO': 'ASPIRIN', 'THROMBO ASPILOTS': 'ASPIRIN',
+    
+    # Amlodipine Variants
+    'AMLODIPIN': 'AMLODIPINE', 'AMLODIPINE BESILATE': 'AMLODIPINE',
+    
+    # Folic Acid Variants
+    'ASAM FOLAT': 'FOLIC ACID', 'FOLIC ACID': 'FOLIC ACID',
+    
+    # Tranexamic Acid
+    'ASAM TRANEKSAMAT': 'TRANEXAMIC ACID', 'TRANEXAMIC': 'TRANEXAMIC ACID',
+    
+    # Acetaminophen
+    'PARASETAMOL': 'ACETAMINOPHEN', 'PARACETAMOL': 'ACETAMINOPHEN',
+    
+    # Others
+    'GLIBENKLAMID': 'GLYBURIDE', 'GLIBENCLAMIDE': 'GLYBURIDE',
+    'KLOPIDOGREL': 'CLOPIDOGREL', 'CLOPIDOGREL BISULFATE': 'CLOPIDOGREL',
+    'KANDESARTAN': 'CANDESARTAN', 'CANDESARTAN CILEXETIL': 'CANDESARTAN',
+    'BISOPROLOL': 'BISOPROLOL', 'BISOPROLOL FUMARATE': 'BISOPROLOL',
+    'FUROSEMID': 'FUROSEMIDE', 'LASIX': 'FUROSEMIDE',
+    'SPIRONOLAKTON': 'SPIRONOLACTONE', 'SPIRONOLACTON': 'SPIRONOLACTONE',
+    'SIMVASTATIN': 'SIMVASTATIN', 
+    'FENITOIN': 'PHENYTOIN', 'PHENYTOIN SODIUM': 'PHENYTOIN', 'KUTOIN': 'PHENYTOIN',
+    'V-BLOC': 'CARVEDILOL', 'CARVEDILOL': 'CARVEDILOL',
+    'NITROKAF': 'NITROGLYCERIN', 'GLISERIL TRINITRAT': 'NITROGLYCERIN',
+    'SUCRALFATE': 'SUCRALFATE', 
+    'IBUPROFEN': 'IBUPROFEN', 
+    'OMEPRAZOLE': 'OMEPRAZOLE', 'OMEPRAZOL': 'OMEPRAZOLE',
+    'VALSARTAN': 'VALSARTAN', 
+    'MELOXICAM': 'MELOXICAM', 
+    'CAPTOPRIL': 'CAPTOPRIL', 
+    'METFORMIN': 'METFORMIN', 'METFORMIN HCL': 'METFORMIN',
+    'GABAPENTIN': 'GABAPENTIN', 
+    'FENOFIBRATE': 'FENOFIBRATE', 
+    'NIFEDIPINE': 'NIFEDIPINE', 
+    'DIGOXIN': 'DIGOXIN', 
+    'METHYL PREDNISOLON': 'METHYLPREDNISOLONE', 'METHYLPREDNISOLONE': 'METHYLPREDNISOLONE',
+    'NOTISIL': 'DIAZEPAM', 
+    'WARFARIN': 'WARFARIN', 'SIMARC': 'WARFARIN'
 }
 
-# 3. KNOWLEDGE BASE
+# --- 2. KNOWLEDGE BASE (Strict English Keys) ---
 KNOWN_INTERACTIONS = {
+    # Major
     frozenset(['AMLODIPINE', 'PHENYTOIN']): ('Major', 'Phenytoin decreases levels of Amlodipine by increasing metabolism.'),
     frozenset(['ASPIRIN', 'IBUPROFEN']): ('Major', 'Ibuprofen may interfere with the anti-platelet effect of low-dose Aspirin.'),
     frozenset(['FENOFIBRATE', 'SIMVASTATIN']): ('Major', 'Increased risk of myopathy/rhabdomyolysis.'),
     frozenset(['CLOPIDOGREL', 'WARFARIN']): ('Major', 'Increased risk of bleeding.'),
     frozenset(['WARFARIN', 'MELOXICAM']): ('Major', 'NSAIDs increase bleeding risk with Anticoagulants.'),
+    
+    # Moderate
     frozenset(['CARVEDILOL', 'IBUPROFEN']): ('Moderate', 'NSAIDs may diminish the antihypertensive effect of Beta-blockers.'),
     frozenset(['PHENYTOIN', 'FOLIC ACID']): ('Moderate', 'Phenytoin may decrease serum Folic Acid; Folic Acid may decrease Phenytoin levels.'),
     frozenset(['MELOXICAM', 'CAPTOPRIL']): ('Moderate', 'NSAIDs may diminish the antihypertensive effect of ACE Inhibitors.'),
@@ -90,6 +89,8 @@ KNOWN_INTERACTIONS = {
     frozenset(['MELOXICAM', 'FENOFIBRATE']): ('Moderate', 'Potential risk of renal toxicity.'),
     frozenset(['MELOXICAM', 'NIFEDIPINE']): ('Moderate', 'NSAIDs may diminish the antihypertensive effect of Calcium Channel Blockers.'),
     frozenset(['CAPTOPRIL', 'METFORMIN']): ('Moderate', 'ACE inhibitors may enhance the hypoglycemic effect of Metformin.'),
+    
+    # Minor
     frozenset(['SPIRONOLACTONE', 'DIGOXIN']): ('Minor', 'Spironolactone may increase Digoxin levels.'),
 }
 
@@ -99,35 +100,30 @@ def clean_drug_name(raw_text):
     if not isinstance(raw_text, str): return ""
     text = raw_text.upper().strip()
     
-    # 1. Basic Cleaning
-    text = re.sub(r'\b(ANS|KIE|RESEP)\b', '', text).strip()
+    # 1. Aggressive Cleaning (R/, prefixes, parens)
+    text = re.sub(r'\b(ANS|KIE|RESEP|R/|OBAT)\b', '', text).strip() # Added R/
+    text = re.sub(r'\([^)]*\)', '', text).strip() # Remove (generic name) or (brand) in parens
     text = re.split(r'[#:]', text)[0].strip()
+    
     if '\n' in text: text = text.split('\n')[0].strip()
-    text = re.sub(r'\b(TAB|CAP|SYR|DROP|TABLET|KAPSUL|INJEKSI|MG|ML|G|PRN|RETARD)\b', '', text)
+    
+    # Remove dosage forms/units
+    text = re.sub(r'\b(TAB|CAP|SYR|DROP|TABLET|KAPSUL|INJEKSI|MG|ML|G|PRN|RETARD|BESILATE|HCL)\b', '', text)
     text = re.sub(r'\b\d+([.,]\d+)?\b', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
     
     if not text: return ""
 
-    # 2. Check Dictionary First (Fastest)
+    # 2. Check Map (Exact or Substring)
     if text in ID_TO_EN_MAP: return ID_TO_EN_MAP[text]
-    # Check partials
+    
+    # Substring check: e.g. "AMLODIPIN 10" -> matches key "AMLODIPIN"
     for k, v in ID_TO_EN_MAP.items():
         if k in text: return v
             
-    # 3. Check Exact Generic List
-    if text in CANONICAL_DRUGS: return text
-    
-    # 4. Fuzzy Match (If library is available)
-    if FUZZY_AVAILABLE:
-        # High confidence only (>=88) to prevent false positives
-        best_match, score = process.extractOne(text, CANONICAL_DRUGS)
-        if score >= 88: return best_match
-
     return text
 
 def safe_parse_fraction(val_str):
-    """Safely converts string numbers/fractions to float."""
     try:
         if '/' in val_str:
             n, d = val_str.split('/')
@@ -140,7 +136,6 @@ def parse_time_slots(prescription_str):
     s = prescription_str.lower()
     slots = set()
     
-    # Check "1-0-0" Pattern
     xyz_match = re.search(r'\b(\d+(?:/\d+)?)\s*-\s*(\d+(?:/\d+)?)\s*-\s*(\d+(?:/\d+)?)\b', s)
     if xyz_match:
         m, n, ni = xyz_match.groups()
@@ -148,7 +143,6 @@ def parse_time_slots(prescription_str):
         if safe_parse_fraction(n) > 0: slots.add('Noon')
         if safe_parse_fraction(ni) > 0: slots.add('Night')
 
-    # Check Frequency
     freq = 0
     match = re.search(r'(\d+)\s*(?:dd|x)', s)
     if match: freq = int(match.group(1))
@@ -167,6 +161,7 @@ def parse_time_slots(prescription_str):
 def analyze_row(row_str, row_id):
     if not isinstance(row_str, str): return [], []
     
+    # Normalize
     normalized_row = row_str.replace('|||', ';').replace('\n', ';').replace('\r', ';')
     items = [x for x in normalized_row.split(';') if x.strip()]
     
@@ -177,7 +172,8 @@ def analyze_row(row_str, row_id):
         canonical = clean_drug_name(item)
         if not canonical or len(canonical) < 3: continue
         
-        parsed_log.append(f"{item[:20]}... -> {canonical}")
+        # Log exact translation
+        parsed_log.append(f"Raw: {item[:15]}... -> Cln: {canonical}")
         
         slots = parse_time_slots(item)
         for slot in slots:
@@ -186,6 +182,7 @@ def analyze_row(row_str, row_id):
 
     alerts = []
     
+    # Analyze
     for slot, drugs in time_buckets.items():
         if len(drugs) < 2: continue
         unique = sorted(list(set(drugs)))
@@ -212,22 +209,14 @@ with st.sidebar:
     st.title("Setup")
     uploaded_file = st.file_uploader("Upload Data", type=['xlsx', 'csv'], label_visibility="collapsed")
     st.divider()
-    
-    st.markdown("### Status")
-    if FUZZY_AVAILABLE:
-        st.success("✅ Fuzzy Match Engine: **Active**")
-    else:
-        st.warning("⚠️ Fuzzy Match Engine: **Inactive**")
-        st.caption("(`pip install fuzzywuzzy` to enable)")
-        
     debug_mode = st.checkbox("🐞 Show Parsed Data", value=False)
 
 st.markdown("""
-<div class="main-header">
+<div style="background-color:white;padding:1.5rem;border-radius:12px;margin-bottom:2rem;display:flex;align-items:center;gap:1rem;">
     <div style="font-size: 2.5rem;">💊</div>
     <div>
         <h1 style="margin:0; font-size: 1.8rem; color:#1e293b;">DDI Analyzer Pro</h1>
-        <p style="margin:0; color:#64748b;">With Robust Parsing & Fuzzy Matching</p>
+        <p style="margin:0; color:#64748b;">Universal Parser V2.2</p>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -241,7 +230,7 @@ if uploaded_file:
         st.stop()
         
     cols = df.columns.str.lower()
-    resep_col = next((df.columns[i] for i, c in enumerate(cols) if 'resep' in c or 'obat' in c), None)
+    resep_col = next((df.columns[i] for i, c in enumerate(cols) if 'resep' in c or 'obat' in c or 'presc' in c), None)
     if not resep_col and len(df.columns) > 1: resep_col = df.columns[1]
     
     if resep_col:
@@ -264,12 +253,11 @@ if uploaded_file:
             bar.empty()
             
             if debug_mode:
-                with st.expander("🐞 Debug Log"):
+                with st.expander("🐞 Debug Log (Check Translations)"):
                     st.write(pd.DataFrame(debug_logs))
 
             if all_alerts:
                 res_df = pd.DataFrame(all_alerts)
-                # Deduplicate
                 res_df = res_df.drop_duplicates(subset=['Prescription ID', 'Drug Pair'])
                 
                 tab1, tab2 = st.tabs(["📊 Dashboard", "📋 Details"])
@@ -280,26 +268,22 @@ if uploaded_file:
                         st.markdown("##### Severity")
                         sev_c = res_df['Severity'].value_counts().reset_index()
                         sev_c.columns = ['Severity', 'Count']
-                        # Fixed: Removed use_container_width
                         st.altair_chart(
                             alt.Chart(sev_c).mark_bar().encode(
                                 x='Severity', y='Count', color='Severity'
-                            ).properties(width=300, height=300) 
+                            ).properties(height=300)
                         )
                     with c2:
                         st.markdown("##### Top Pairs")
                         top = res_df['Drug Pair'].value_counts().head(10).reset_index()
                         top.columns = ['Pair', 'Count']
-                        # Fixed: Removed use_container_width
                         st.altair_chart(
                             alt.Chart(top).mark_bar().encode(
                                 x='Count', y=alt.Y('Pair', sort='-x'), color=alt.value('#10b981')
-                            ).properties(width=300, height=300)
+                            ).properties(height=300)
                         )
 
                 with tab2:
-                    st.markdown("### Interaction Log")
-                    # Fixed: Removed use_container_width (default behavior is usually fine)
                     st.dataframe(res_df, hide_index=True)
             else:
-                st.warning("No interactions found. Enable 'Show Parsed Data' to troubleshoot.")
+                st.warning("No interactions found. Check the Debug Log to ensure 'Raw' names map to 'Clean' English names.")
