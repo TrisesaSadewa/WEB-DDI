@@ -6,33 +6,20 @@ import time
 import altair as alt
 from itertools import combinations
 
+# --- 1. SAFELY LOAD YOUR DATABASE (CRITICAL FOR OLD DATA) ---
+# This file maps brands like "V-Bloc" -> "Carvedilol"
+try:
+    from structured_drug_db import get_drug_by_name
+    DB_AVAILABLE = True
+except ImportError:
+    DB_AVAILABLE = False
+    def get_drug_by_name(name): return None
+
 # --- CONFIGURATION ---
-st.set_page_config(
-    page_title="DDI Analysis Tool", 
-    layout="wide",
-    page_icon="💊",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="DDI Analysis Tool", layout="wide", page_icon="💊")
 
-# --- CUSTOM CSS ---
-st.markdown("""
-    <style>
-    .stApp { background-color: #f8fafc; color: #1e293b; }
-    [data-testid="stSidebar"] { background-color: #ffffff; border-right: 1px solid #e2e8f0; }
-    .main-header {
-        background-color: white; padding: 1.5rem 2rem; border-radius: 12px;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); margin-bottom: 2rem;
-        border: 1px solid #f1f5f9; display: flex; align-items: center; gap: 1rem;
-    }
-    div[data-testid="stMetric"] {
-        background-color: white; padding: 1.25rem; border-radius: 12px;
-        border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-    }
-    </style>
-""", unsafe_allow_html=True)
-
-# --- 1. ROBUST TRANSLATION MAP (The Fix for "No Interactions") ---
-# Maps Indonesian/Trade names to the English Generic names the API/KB expects.
+# --- 2. HARDCODED MAP (FAILSAFE) ---
+# Used if structured_drug_db misses something or is not uploaded
 ID_TO_EN_MAP = {
     'AMLODIPIN': 'AMLODIPINE', 'ASAM FOLAT': 'FOLIC ACID', 
     'ASAM TRANEKSAMAT': 'TRANEXAMIC ACID', 'PARASETAMOL': 'ACETAMINOPHEN', 
@@ -52,7 +39,7 @@ ID_TO_EN_MAP = {
     'WARFARIN': 'WARFARIN', 'SIMARC': 'WARFARIN', 'THROMBO': 'ASPIRIN'
 }
 
-# --- 2. KNOWLEDGE BASE (Guaranteed Detection) ---
+# --- 3. KNOWLEDGE BASE (STRICT ENGLISH KEYS) ---
 KNOWN_INTERACTIONS = {
     frozenset(['AMLODIPINE', 'PHENYTOIN']): ('Major', 'Phenytoin decreases levels of Amlodipine by increasing metabolism.'),
     frozenset(['ASPIRIN', 'IBUPROFEN']): ('Major', 'Ibuprofen may interfere with the anti-platelet effect of low-dose Aspirin.'),
@@ -71,28 +58,41 @@ KNOWN_INTERACTIONS = {
 # --- HELPER FUNCTIONS ---
 
 def clean_drug_name(raw_text):
-    """Parses and translates drug names."""
+    """
+    Priority:
+    1. Clean Noise
+    2. Check structured_drug_db (The massive file you uploaded)
+    3. Check Hardcoded Map (Fallback)
+    4. Return Original
+    """
     if not isinstance(raw_text, str): return ""
     text = raw_text.upper().strip()
     
-    # 1. Clean Noise (Prefixes, R/, etc)
+    # 1. Clean Noise (Prefixes like R/, ANS, generic dosages)
     text = re.sub(r'\b(ANS|KIE|RESEP|R/|OBAT)\b', '', text).strip()
-    
-    # 2. Handle Separators (# or :)
-    text = re.split(r'[#:]', text)[0].strip()
-    
-    # 3. Handle Multiline
+    text = re.split(r'[#:]', text)[0].strip() # Split at # or :
     if '\n' in text: text = text.split('\n')[0].strip()
     
-    # 4. Remove Forms/Dosages
+    # Remove dosage forms to help matching
     text = re.sub(r'\b(TAB|CAP|SYR|DROP|TABLET|KAPSUL|INJEKSI|MG|ML|G|PRN|RETARD)\b', '', text)
     text = re.sub(r'\b\d+([.,]\d+)?\b', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
     
-    # 5. TRANSLATE (Crucial Step)
+    if not text: return ""
+
+    # 2. CHECK DB (Primary Source for "V-Bloc", "Simarc", etc)
+    if DB_AVAILABLE:
+        try:
+            # We look up the cleaned name in your database
+            drug_obj = get_drug_by_name(text)
+            # We safely check if it returned a valid object with a name
+            if drug_obj and hasattr(drug_obj, 'name'):
+                return drug_obj.name.upper() # Returns "CARVEDILOL" for "V-BLOC"
+        except Exception:
+            pass # Continue to fallback if DB errors
+
+    # 3. CHECK HARDCODED MAP
     if text in ID_TO_EN_MAP: return ID_TO_EN_MAP[text]
-    
-    # Substring match (e.g. "ANS AMLODIPIN" -> "AMLODIPINE")
     for k, v in ID_TO_EN_MAP.items():
         if k in text: return v
             
@@ -102,7 +102,7 @@ def parse_time_slots(prescription_str):
     s = prescription_str.lower()
     slots = set()
     
-    # Check "1-0-0" Pattern
+    # Format 1: "1-0-0"
     xyz_match = re.search(r'\b(\d+(?:/\d+)?)\s*-\s*(\d+(?:/\d+)?)\s*-\s*(\d+(?:/\d+)?)\b', s)
     if xyz_match:
         m, n, ni = xyz_match.groups()
@@ -112,7 +112,7 @@ def parse_time_slots(prescription_str):
             if eval(str(ni)) > 0: slots.add('Night')
         except: pass
 
-    # Check Frequency
+    # Format 2: "3 dd 1" / "3x1"
     freq = 0
     match = re.search(r'(\d+)\s*(?:dd|x)', s)
     if match: freq = int(match.group(1))
@@ -136,40 +136,42 @@ def determine_severity(text):
 
 @st.cache_data(ttl=7200)
 def get_drug_label_text(drug_name):
-    """Fetches FDA label text."""
+    """Fetches FDA label text (Fallback for unknown drugs)."""
     base_url = "https://api.fda.gov/drug/label.json"
     try:
+        # Search both brand and generic
         query = f'openfda.brand_name:"{drug_name}"+OR+openfda.generic_name:"{drug_name}"'
         resp = requests.get(base_url, params={'search': query, 'limit': 1}, timeout=3)
         if resp.status_code == 200:
             data = resp.json()
             if 'results' in data:
                 res = data['results'][0]
-                fields = ['drug_interactions', 'warnings', 'precautions', 'contraindications']
+                fields = ['drug_interactions', 'warnings', 'precautions']
                 return " ".join([" ".join(res.get(f, [])) for f in fields])
     except: pass
     return ""
 
 def check_fda_interaction_robust(drug_a, drug_b):
-    """Checks FDA API as fallback."""
     text_a = get_drug_label_text(drug_a)
     if text_a and drug_b in text_a.upper():
-        return True, f"Potential interaction mentioned in {drug_a} FDA label."
+        return True, f"Potential interaction mentioned in {drug_a} FDA label regarding {drug_b}."
     return False, None
 
 def analyze_row(row_str, row_id):
     if not isinstance(row_str, str): return []
     
-    # Normalize Delimiters (The fix for Old vs New data)
+    # NORMALIZE SEPARATORS (Handles ||| and \n)
     normalized_row = row_str.replace('|||', ';').replace('\n', ';').replace('\r', ';')
     items = [x for x in normalized_row.split(';') if x.strip()]
     
     time_buckets = {'Morning': [], 'Noon': [], 'Night': [], 'Global': []}
     
     for item in items:
+        # CLEAN & TRANSLATE
         canonical = clean_drug_name(item)
         if not canonical or len(canonical) < 3: continue
         
+        # BUCKET BY TIME
         slots = parse_time_slots(item)
         for slot in slots:
             time_buckets[slot].append(canonical)
@@ -177,7 +179,6 @@ def analyze_row(row_str, row_id):
 
     alerts = []
     
-    # Check interactions in all buckets
     for slot, drugs in time_buckets.items():
         if len(drugs) < 2: continue
         unique = sorted(list(set(drugs)))
@@ -185,7 +186,7 @@ def analyze_row(row_str, row_id):
         for d1, d2 in combinations(unique, 2):
             pair_key = frozenset([d1, d2])
             
-            # 1. CHECK KB (Fast & Accurate)
+            # 1. CHECK KB (Exact Matches)
             if pair_key in KNOWN_INTERACTIONS:
                 sev, desc = KNOWN_INTERACTIONS[pair_key]
                 alerts.append({
@@ -195,8 +196,8 @@ def analyze_row(row_str, row_id):
                     'Warning': f"[KB] {desc}",
                     'Severity': sev
                 })
-            # 2. CHECK API (Fallback)
-            elif slot != 'Global': # Only check API for specific time slots to save requests
+            # 2. CHECK API (Only if not in KB)
+            elif slot != 'Global': 
                 found, desc = check_fda_interaction_robust(d1, d2)
                 if found:
                     alerts.append({
@@ -214,124 +215,88 @@ def analyze_row(row_str, row_id):
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/3063/3063167.png", width=60)
     st.title("Setup")
-    uploaded_file = st.file_uploader("Choose .xlsx or .csv", type=['xlsx', 'csv'], label_visibility="collapsed")
+    uploaded_file = st.file_uploader("Upload Data", type=['xlsx', 'csv'], label_visibility="collapsed")
     st.divider()
-    st.info("ℹ️ **Privacy Note:**\nAll processing happens in-memory.")
+    
+    if DB_AVAILABLE:
+        st.success("✅ **External DB Loaded**")
+        st.caption("Using `structured_drug_db.py` for translation.")
+    else:
+        st.error("❌ **External DB Missing**")
+        st.caption("Please ensure `structured_drug_db.py` is in the same folder.")
 
 st.markdown("""
-<div class="main-header">
+<div style="background-color:white;padding:1.5rem;border-radius:12px;margin-bottom:2rem;display:flex;align-items:center;gap:1rem;">
     <div style="font-size: 2.5rem;">💊</div>
     <div>
         <h1 style="margin:0; font-size: 1.8rem; color:#1e293b;">DDI Analyzer Pro</h1>
-        <p style="margin:0; color:#64748b;">Automated Prescription Interaction Scanner</p>
+        <p style="margin:0; color:#64748b;">Hybrid Engine: DB + KB + FDA API</p>
     </div>
 </div>
 """, unsafe_allow_html=True)
 
 if uploaded_file:
-    with st.spinner('Parsing file structure...'):
-        try:
-            if uploaded_file.name.endswith('.csv'): df = pd.read_csv(uploaded_file)
-            else: df = pd.read_excel(uploaded_file)
-        except Exception as e:
-            st.error(f"Error reading file: {e}")
-            st.stop()
-            
+    try:
+        if uploaded_file.name.endswith('.csv'): df = pd.read_csv(uploaded_file)
+        else: df = pd.read_excel(uploaded_file)
+    except Exception as e:
+        st.error(f"Error: {e}")
+        st.stop()
+        
     cols = df.columns.str.lower()
     resep_col = next((df.columns[i] for i, c in enumerate(cols) if 'resep' in c or 'obat' in c or 'presc' in c), None)
     if not resep_col and len(df.columns) > 1: resep_col = df.columns[1]
     
     if resep_col:
-        col_preview, col_action = st.columns([2, 1])
-        with col_preview:
-            with st.expander("📄 Data Preview"):
-                st.dataframe(df.head(), use_container_width=True)
-        
-        with col_action:
-            st.write("") 
-            start_btn = st.button("🚀 Start Analysis", type="primary", use_container_width=True)
-
-        if start_btn:
+        st.success(f"Scanning column: **{resep_col}**")
+        if st.button("🚀 Start Analysis", type="primary"):
             all_alerts = []
-            progress_container = st.container()
             
-            with progress_container:
-                st.write("---")
-                p_bar = st.progress(0)
-                status_text = st.empty()
-            
+            bar = st.progress(0)
             rows = df.to_dict('records')
             total = len(rows)
             
             for i, row in enumerate(rows):
                 rid = row.get('No', row.get('ID', i + 1))
                 rstr = str(row.get(resep_col, ''))
-                all_alerts.extend(analyze_row(rstr, rid))
+                
+                alerts = analyze_row(rstr, rid)
+                all_alerts.extend(alerts)
                 
                 if i % 5 == 0 or i == total - 1:
-                    p_bar.progress((i + 1) / total)
-                    status_text.text(f"Processing {i + 1}/{total}...")
-            
-            p_bar.empty()
-            status_text.empty()
-            
-            # --- RESULTS ---
-            st.markdown("### Analysis Report")
+                    bar.progress((i+1)/total)
+            bar.empty()
             
             if all_alerts:
-                results_df = pd.DataFrame(all_alerts)
-                # Deduplicate logic: If caught in Morning, don't show again in Global
-                results_df = results_df.sort_values('Time Slot').drop_duplicates(subset=['Prescription ID', 'Drug Pair'])
+                res_df = pd.DataFrame(all_alerts)
+                res_df = res_df.sort_values('Time Slot').drop_duplicates(subset=['Prescription ID', 'Drug Pair'])
                 
-                # Metrics
-                total_rx = len(df)
-                affected = results_df['Prescription ID'].nunique()
+                tab1, tab2 = st.tabs(["📊 Dashboard", "📋 Details"])
                 
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Total Interactions", len(results_df))
-                m2.metric("At-Risk Prescriptions", affected, delta=f"{affected/total_rx*100:.1f}%", delta_color="inverse")
-                m3.metric("Unique Drug Pairs", results_df['Drug Pair'].nunique())
-                
-                tab_viz, tab_data, tab_export = st.tabs(["📊 Visualizations", "📋 Interaction Log", "📥 Exports"])
-                
-                with tab_viz:
+                with tab1:
                     c1, c2 = st.columns(2)
                     with c1:
                         st.markdown("##### Severity")
-                        sev_c = results_df['Severity'].value_counts().reset_index()
+                        sev_c = res_df['Severity'].value_counts().reset_index()
                         sev_c.columns = ['Severity', 'Count']
                         st.altair_chart(
                             alt.Chart(sev_c).mark_bar().encode(
                                 x='Severity', y='Count', color='Severity'
-                            ).properties(width='container'), 
+                            ).properties(height=300),
                             use_container_width=True
                         )
                     with c2:
                         st.markdown("##### Top Pairs")
-                        top = results_df['Drug Pair'].value_counts().head(10).reset_index()
+                        top = res_df['Drug Pair'].value_counts().head(10).reset_index()
                         top.columns = ['Pair', 'Count']
                         st.altair_chart(
                             alt.Chart(top).mark_bar().encode(
                                 x='Count', y=alt.Y('Pair', sort='-x'), color=alt.value('#10b981')
-                            ).properties(width='container'),
+                            ).properties(height=300),
                             use_container_width=True
                         )
 
-                with tab_data:
-                    st.dataframe(results_df, use_container_width=True, hide_index=True)
-
-                with tab_export:
-                    csv = results_df.to_csv(index=False).encode('utf-8')
-                    st.download_button("📥 Download CSV", csv, "ddi_report.csv", "text/csv", type="primary")
+                with tab2:
+                    st.dataframe(res_df, use_container_width=True, hide_index=True)
             else:
-                st.success("✅ No significant interactions detected.")
-                st.balloons()
-    else:
-        st.error("❌ Column 'resep' not found.")
-else:
-    st.markdown("""
-    <div style="text-align: center; padding: 4rem 2rem; border: 2px dashed #cbd5e1; border-radius: 12px; background-color: white;">
-        <h3 style="color: #475569;">No Data Uploaded</h3>
-        <p style="color: #64748b;">Upload a prescription file (.xlsx or .csv) to begin.</p>
-    </div>
-    """, unsafe_allow_html=True)
+                st.warning("No interactions found. Check that `structured_drug_db.py` matches the names in your old data.")
