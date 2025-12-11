@@ -5,6 +5,7 @@ import re
 import time
 import altair as alt
 from itertools import combinations
+from fuzzywuzzy import process # Standard library for fuzzy matching
 
 # --- CONFIGURATION ---
 st.set_page_config(
@@ -14,24 +15,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- CUSTOM CSS ---
-st.markdown("""
-    <style>
-    .stApp { background-color: #f8fafc; color: #1e293b; }
-    [data-testid="stSidebar"] { background-color: #ffffff; border-right: 1px solid #e2e8f0; }
-    .main-header {
-        background-color: white; padding: 1.5rem; border-radius: 12px;
-        box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); margin-bottom: 2rem;
-        border: 1px solid #f1f5f9; display: flex; align-items: center; gap: 1rem;
-    }
-    div[data-testid="stMetric"] {
-        background-color: white; border: 1px solid #e2e8f0; border-radius: 12px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-    }
-    </style>
-""", unsafe_allow_html=True)
-
-# --- DATABASE LOADING ---
+# --- DATABASE & KNOWLEDGE BASE ---
 try:
     from structured_drug_db import get_drug_by_name
     DB_AVAILABLE = True
@@ -39,46 +23,19 @@ except ImportError:
     DB_AVAILABLE = False
     def get_drug_by_name(name): return None
 
-# --- 1. ROBUST TRANSLATION MAP (FAILSAFE) ---
-# If the DB fails or isn't present, this ensures we catch common Indonesian names.
-ID_TO_EN_MAP = {
-    'AMLODIPIN': 'AMLODIPINE',
-    'AMLODIPINE': 'AMLODIPINE',
-    'ASAM FOLAT': 'FOLIC ACID',
-    'ASAM TRANEKSAMAT': 'TRANEXAMIC ACID',
-    'PARASETAMOL': 'ACETAMINOPHEN',
-    'GLIBENKLAMID': 'GLYBURIDE',
-    'KLOPIDOGREL': 'CLOPIDOGREL',
-    'KANDESARTAN': 'CANDESARTAN',
-    'BISOPROLOL': 'BISOPROLOL',
-    'FUROSEMID': 'FUROSEMIDE',
-    'SPIRONOLAKTON': 'SPIRONOLACTONE',
-    'SIMVASTATIN': 'SIMVASTATIN',
-    'FENITOIN': 'PHENYTOIN',
-    'PHENITOIN': 'PHENYTOIN',
-    'ASAM ASETILSALISILAT': 'ASPIRIN',
-    'ASETOSAL': 'ASPIRIN',
-    'MINIASPI': 'ASPIRIN',
-    'NOSPIRINAL': 'ASPIRIN',
-    'V-BLOC': 'CARVEDILOL', 
-    'NITROKAF': 'NITROGLYCERIN',
-    'SUCRALFATE': 'SUCRALFATE',
-    'IBUPROFEN': 'IBUPROFEN',
-    'OMEPRAZOLE': 'OMEPRAZOLE',
-    'VALSARTAN': 'VALSARTAN',
-    'MELOXICAM': 'MELOXICAM',
-    'CAPTOPRIL': 'CAPTOPRIL',
-    'METFORMIN': 'METFORMIN',
-    'GABAPENTIN': 'GABAPENTIN',
-    'FENOFIBRATE': 'FENOFIBRATE',
-    'NIFEDIPINE': 'NIFEDIPINE',
-    'DIGOXIN': 'DIGOXIN',
-    'METHYL PREDNISOLON': 'METHYLPREDNISOLONE',
-    'WARFARIN': 'WARFARIN',
-    'SIMARC': 'WARFARIN'
-}
+# 1. CANONICAL DRUG LIST (The "Target" list for fuzzy matching)
+# These are the correct English names we want to map TO.
+CANONICAL_DRUGS = [
+    'AMLODIPINE', 'ASPIRIN', 'ACETAMINOPHEN', 'BISOPROLOL', 'CANDESARTAN', 
+    'CAPTOPRIL', 'CARVEDILOL', 'CLOPIDOGREL', 'DIGOXIN', 'FENOFIBRATE', 
+    'FOLIC ACID', 'FUROSEMIDE', 'GABAPENTIN', 'GLYBURIDE', 'IBUPROFEN', 
+    'INSULIN', 'MELOXICAM', 'METFORMIN', 'METHYLPREDNISOLONE', 'NIFEDIPINE', 
+    'NITROGLYCERIN', 'OMEPRAZOLE', 'PHENYTOIN', 'SIMVASTATIN', 
+    'SODIUM BICARBONATE', 'SPIRONOLACTONE', 'SUCRALFATE', 'TRANEXAMIC ACID', 
+    'VALSARTAN', 'WARFARIN'
+]
 
-# --- 2. KNOWLEDGE BASE (EXACT MATCH KEYS) ---
+# 2. KNOWN INTERACTIONS (Knowledge Base)
 KNOWN_INTERACTIONS = {
     # MAJOR
     frozenset(['AMLODIPINE', 'PHENYTOIN']): ('Major', 'Phenytoin decreases levels of Amlodipine by increasing metabolism.'),
@@ -104,46 +61,41 @@ KNOWN_INTERACTIONS = {
 # --- HELPER FUNCTIONS ---
 
 def clean_drug_name(raw_text):
-    """Clean -> Translate -> Canonical Name"""
+    """
+    1. Clean Noise
+    2. Try Exact Match
+    3. Try Fuzzy Match (The new layer!)
+    """
     if not isinstance(raw_text, str): return ""
     text = raw_text.upper().strip()
     
     # 1. Clean Noise
     text = re.sub(r'\b(ANS|KIE|RESEP)\b', '', text).strip()
-    
-    # 2. Split Alternate Style (# or :)
     text = re.split(r'[#:]', text)[0].strip()
-    
-    # 3. Handle Multiline
     if '\n' in text: text = text.split('\n')[0].strip()
-        
-    # 4. Remove Forms/Dosages
     text = re.sub(r'\b(TAB|CAP|SYR|DROP|TABLET|KAPSUL|INJEKSI|MG|ML|G|PRN|RETARD)\b', '', text)
-    text = re.sub(r'\b\d+([.,]\d+)?\b', '', text) # Remove loose numbers
+    text = re.sub(r'\b\d+([.,]\d+)?\b', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
 
-    # 5. Check Dictionary Failsafe FIRST (Robustness)
-    if text in ID_TO_EN_MAP:
-        return ID_TO_EN_MAP[text]
-    
-    # 6. Check Partial Dictionary Match (e.g., "ANS AMLODIPIN" -> "AMLODIPIN")
-    for key in ID_TO_EN_MAP:
-        if key in text:
-            return ID_TO_EN_MAP[key]
+    if not text: return ""
 
-    # 7. Database Lookup
-    if DB_AVAILABLE:
-        drug_obj = get_drug_by_name(text)
-        if drug_obj and hasattr(drug_obj, 'name'):
-            return drug_obj.name.upper()
+    # 2. Exact Match Check (Fastest)
+    if text in CANONICAL_DRUGS:
+        return text
+
+    # 3. Fuzzy Match (Robust Fallback)
+    # This will find "AMLODIPIN" -> "AMLODIPINE" (Score > 90)
+    best_match, score = process.extractOne(text, CANONICAL_DRUGS)
+    if score >= 88: # High threshold to avoid "Tramadol" vs "Toradol" errors
+        return best_match
             
-    return text # Fallback
+    return text # Return raw if no good match found
 
 def parse_time_slots(prescription_str):
     s = prescription_str.lower()
     slots = set()
     
-    # 1. Check "1-0-0" Pattern
+    # Check "1-0-0" Pattern
     xyz_match = re.search(r'\b(\d+(?:/\d+)?)\s*-\s*(\d+(?:/\d+)?)\s*-\s*(\d+(?:/\d+)?)\b', s)
     if xyz_match:
         m, n, ni = xyz_match.groups()
@@ -153,7 +105,7 @@ def parse_time_slots(prescription_str):
             if eval(str(ni)) > 0: slots.add('Night')
         except: pass
 
-    # 2. Check Frequency
+    # Check Frequency
     freq = 0
     match = re.search(r'(\d+)\s*(?:dd|x)', s)
     if match: freq = int(match.group(1))
@@ -172,32 +124,27 @@ def parse_time_slots(prescription_str):
 def analyze_row(row_str, row_id):
     if not isinstance(row_str, str): return [], []
     
-    # Normalize Delimiters
     normalized_row = row_str.replace('|||', ';').replace('\n', ';').replace('\r', ';')
     items = [x for x in normalized_row.split(';') if x.strip()]
     
     time_buckets = {'Morning': [], 'Noon': [], 'Night': [], 'Entire Prescription': []}
     parsed_log = []
     
-    # 1. Bucket Drugs
     for item in items:
         canonical = clean_drug_name(item)
         if not canonical or len(canonical) < 3: continue
         
+        # Log the mapping for debugging
         parsed_log.append(f"{item[:15]}... -> {canonical}")
         
-        # Add to Specific Slots
         slots = parse_time_slots(item)
         for slot in slots:
             time_buckets[slot].append(canonical)
-            
-        # Add to Global Bucket (To catch interactions regardless of time)
         time_buckets['Entire Prescription'].append(canonical)
 
     alerts = []
-    seen_pairs = set()
-
-    # 2. Analyze
+    
+    # Check interactions in all buckets
     for slot, drugs in time_buckets.items():
         if len(drugs) < 2: continue
         unique = sorted(list(set(drugs)))
@@ -205,16 +152,11 @@ def analyze_row(row_str, row_id):
         for d1, d2 in combinations(unique, 2):
             pair_key = frozenset([d1, d2])
             
-            # Prevent duplicate alerts for the same pair in "Entire Prescription" 
-            # if it was already caught in a specific time slot
-            alert_id = f"{row_id}-{pair_key}-{slot}"
-            
-            # CHECK STATIC KB
             if pair_key in KNOWN_INTERACTIONS:
                 sev, desc = KNOWN_INTERACTIONS[pair_key]
                 alerts.append({
                     'Prescription ID': row_id,
-                    'Context': slot, # e.g., "Morning" or "Entire Prescription"
+                    'Context': slot,
                     'Drug Pair': f"{d1} + {d2}",
                     'Warning': desc,
                     'Severity': sev
@@ -227,16 +169,16 @@ def analyze_row(row_str, row_id):
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/3063/3063167.png", width=60)
     st.title("Setup")
-    uploaded_file = st.file_uploader("Upload .xlsx / .csv", type=['xlsx', 'csv'], label_visibility="collapsed")
+    uploaded_file = st.file_uploader("Upload Data", type=['xlsx', 'csv'], label_visibility="collapsed")
     st.divider()
-    debug_mode = st.checkbox("🐞 Show Parsed Data", value=False, help="See exactly how drug names are being read.")
+    debug_mode = st.checkbox("🐞 Show Parsed Data", value=False, help="See fuzzy match results.")
 
 st.markdown("""
-<div class="main-header">
+<div style="background-color:white;padding:1.5rem;border-radius:12px;box-shadow:0 4px 6px -1px rgba(0,0,0,0.05);margin-bottom:2rem;display:flex;align-items:center;gap:1rem;">
     <div style="font-size: 2.5rem;">💊</div>
     <div>
         <h1 style="margin:0; font-size: 1.8rem; color:#1e293b;">DDI Analyzer Pro</h1>
-        <p style="margin:0; color:#64748b;">Automated Prescription Interaction Scanner</p>
+        <p style="margin:0; color:#64748b;">With Fuzzy Matching Engine</p>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -249,13 +191,12 @@ if uploaded_file:
         st.error(f"Error: {e}")
         st.stop()
         
-    # Column Discovery
     cols = df.columns.str.lower()
     resep_col = next((df.columns[i] for i, c in enumerate(cols) if 'resep' in c or 'obat' in c), None)
-    if not resep_col and len(df.columns) > 1: resep_col = df.columns[1] # Fallback
+    if not resep_col and len(df.columns) > 1: resep_col = df.columns[1]
     
     if resep_col:
-        st.success(f"✅ Found prescription column: **{resep_col}**")
+        st.success(f"✅ Scanning column: **{resep_col}**")
         if st.button("🚀 Start Analysis", type="primary"):
             all_alerts = []
             debug_logs = []
@@ -274,13 +215,14 @@ if uploaded_file:
             bar.empty()
             
             if debug_mode:
-                with st.expander("🐞 Debug: Extracted Drug Names"):
+                with st.expander("🐞 Debug Log (Fuzzy Match Results)"):
                     st.write(pd.DataFrame(debug_logs))
 
             if all_alerts:
                 res_df = pd.DataFrame(all_alerts)
+                # Deduplicate same interaction appearing in 'Entire Prescription' AND 'Morning'
+                res_df = res_df.drop_duplicates(subset=['Prescription ID', 'Drug Pair'])
                 
-                # --- VISUALS ---
                 tab1, tab2 = st.tabs(["📊 Dashboard", "📋 Details"])
                 
                 with tab1:
@@ -289,12 +231,11 @@ if uploaded_file:
                         st.markdown("##### Severity")
                         sev_c = res_df['Severity'].value_counts().reset_index()
                         sev_c.columns = ['Severity', 'Count']
-                        # use_container_width=True replaced with standard Streamlit theme handling
                         st.altair_chart(
                             alt.Chart(sev_c).mark_bar().encode(
                                 x='Severity', y='Count', color='Severity'
                             ).properties(height=300),
-                            use_container_width=True 
+                            use_container_width=True
                         )
                     with c2:
                         st.markdown("##### Top Pairs")
@@ -309,11 +250,6 @@ if uploaded_file:
 
                 with tab2:
                     st.markdown("### Interaction Log")
-                    # Fixed Deprecation Warning: used width="stretch" (or implicitly handled by st.dataframe defaults in newer versions)
-                    st.dataframe(
-                        res_df, 
-                        use_container_width=True, # In very new Streamlit versions, simply removing this might be needed if strictly deprecated, but 'use_container_width' is usually the standard replacement for 'width' param in older st.
-                        hide_index=True
-                    )
+                    st.dataframe(res_df, use_container_width=True, hide_index=True)
             else:
-                st.warning("No interactions found. Enable 'Show Parsed Data' in the sidebar to verify drug extraction.")
+                st.warning("No interactions found. Check the Debug Log to see if fuzzy matching is working.")
