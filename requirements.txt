@@ -4,3 +4,4 @@ requests
 fuzzywuzzy
 python-Levenshtein
 openpyxl
+altair
